@@ -1,0 +1,36 @@
+spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://192.168.101.128:3306/upload_base?useUnicode=true&characterEncoding=UTF-8&serverTimezone=GMT%2b8
+    username: root
+    password: 123456
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 2048MB
+
+  redis:
+    host: 192.168.101.128
+    port: 6379
+    password: 123456
+    database: 0
+    timeout: 1000
+
+    lettuce:
+      pool:
+        max-active: 100
+        max-idle: 50
+        min-idle: 10
+
+
+mine:
+  upload:
+    target-dir: G:\env\sliceUpload\target
+    temp-dir: G:\env\sliceUpload\temp
+
+minio:
+  endpoint: http://127.0.0.1:9000
+  access-key: minioadmin
+  secret-key: minioadmin
+  bucket: upload
+

@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>分片上传 Demo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 { text-align: center; color: #333; margin-bottom: 30px; }
+        
+        /* 上传区域 */
+        .upload-area {
+            border: 2px dashed #ddd;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .upload-area:hover {
+            border-color: #409EFF;
+            background: #f0f9ff;
+        }
+        .upload-area.dragover {
+            border-color: #409EFF;
+            background: #e6f7ff;
+        }
+        .upload-icon { font-size: 48px; color: #999; }
+        .upload-text { color: #666; margin-top: 10px; }
+        
+        /* 文件信息 */
+        .file-info {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 5px;
+            display: none;
+        }
+        .file-info.show { display: block; }
+        .file-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        .file-label { color: #666; }
+        .file-value { color: #333; font-weight: bold; }
+        
+        /* 进度条 */
+        .progress-container {
+            margin-top: 20px;
+            display: none;
+        }
+        .progress-container.show { display: block; }
+        .progress-bar {
+            height: 20px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #409EFF, #67C23A);
+            width: 0%;
+            transition: width 0.3s;
+            border-radius: 10px;
+        }
+        .progress-text {
+            text-align: center;
+            margin-top: 10px;
+            color: #666;
+        }
+        
+        /* 按钮 */
+        .btn-group {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 0 10px;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: #409EFF;
+            color: white;
+        }
+        .btn-primary:hover { background: #66b1ff; }
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .btn-success {
+            background: #67C23A;
+            color: white;
+        }
+        .btn-success:hover { background: #85ce61; }
+        
+        /* 日志 */
+        .log-container {
+            margin-top: 30px;
+            padding: 15px;
+            background: #1e1e1e;
+            border-radius: 5px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .log-title {
+            color: #fff;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        .log-item {
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+        .log-item.error { color: #ff4444; }
+        .log-item.warn { color: #ffbb00; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📤 大文件分片上传 Demo</h1>
+        
+        <!-- 上传区域 -->
+        <div class="upload-area" id="uploadArea">
+            <div class="upload-icon">📁</div>
+            <div class="upload-text">点击或拖拽文件到此处上传</div>
+            <input type="file" id="fileInput" style="display: none;">
+        </div>
+        
+        <!-- 文件信息 -->
+        <div class="file-info" id="fileInfo">
+            <div class="file-row">
+                <span class="file-label">文件名：</span>
+                <span class="file-value" id="fileName">-</span>
+            </div>
+            <div class="file-row">
+                <span class="file-label">文件大小：</span>
+                <span class="file-value" id="fileSize">-</span>
+            </div>
+            <div class="file-row">
+                <span class="file-label">分片大小：</span>
+                <span class="file-value">5 MB</span>
+            </div>
+            <div class="file-row">
+                <span class="file-label">总分片数：</span>
+                <span class="file-value" id="totalChunks">-</span>
+            </div>
+        </div>
+        
+        <!-- 进度条 -->
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="progress-text" id="progressText">0%</div>
+        </div>
+        
+        <!-- 按钮 -->
+        <div class="btn-group">
+            <button class="btn btn-primary" id="uploadBtn" disabled>开始上传</button>
+            <button class="btn btn-success" id="mergeBtn" disabled>合并文件</button>
+        </div>
+        
+        <!-- 日志 -->
+        <div class="log-container">
+            <div class="log-title">📋 上传日志</div>
+            <div id="logList"></div>
+        </div>
+    </div>
+
+    <script>
+        // ==================== 配置 ====================
+        const CONFIG = {
+            CHUNK_SIZE: 5 * 1024 * 1024,  // 分片大小 5MB
+            CONCURRENT_LIMIT: 3,           // 并发上传数
+            API_BASE: 'http://localhost:8080/api/file'  // 后端接口地址
+        };
+
+        // ==================== 状态 ====================
+        let state = {
+            file: null,
+            fileMd5: null,
+            totalChunks: 0,
+            uploadedChunks: new Set(),
+            isUploading: false
+        };
+
+        // ==================== DOM 元素 ====================
+        const elements = {
+            uploadArea: document.getElementById('uploadArea'),
+            fileInput: document.getElementById('fileInput'),
+            fileInfo: document.getElementById('fileInfo'),
+            fileName: document.getElementById('fileName'),
+            fileSize: document.getElementById('fileSize'),
+            totalChunks: document.getElementById('totalChunks'),
+            progressContainer: document.getElementById('progressContainer'),
+            progressFill: document.getElementById('progressFill'),
+            progressText: document.getElementById('progressText'),
+            uploadBtn: document.getElementById('uploadBtn'),
+            mergeBtn: document.getElementById('mergeBtn'),
+            logList: document.getElementById('logList')
+        };
+
+        // ==================== 工具函数 ====================
+        
+        // 格式化文件大小
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+            if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+            return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+        }
+
+        // 添加日志
+        function addLog(message, type = 'info') {
+            const time = new Date().toLocaleTimeString();
+            const div = document.createElement('div');
+            div.className = `log-item ${type}`;
+            div.textContent = `[${time}] ${message}`;
+            elements.logList.appendChild(div);
+            elements.logList.scrollTop = elements.logList.scrollHeight;
+        }
+
+        // 计算文件 MD5（使用 SparkMD5 库）
+        async function calculateMd5(file) {
+            addLog('开始计算文件 MD5...');
+            
+            // 方法 1：使用 SparkMD5（推荐，需要引入库）
+            // 方法 2：使用浏览器原生 Crypto API（简单 demo 用）
+            
+            return new Promise((resolve, reject) => {
+                const spark = new SparkMD5.ArrayBuffer();
+                const fileReader = new FileReader();
+                const chunkSize = 2 * 1024 * 1024;  // 2MB 一块计算
+                let currentChunk = 0;
+                const chunks = Math.ceil(file.size / chunkSize);
+
+                fileReader.onload = function(e) {
+                    spark.append(e.target.result);
+                    currentChunk++;
+
+                    if (currentChunk < chunks) {
+                        loadNext();
+                    } else {
+                        const md5 = spark.end();
+                        addLog(`MD5 计算完成：${md5}`);
+                        resolve(md5);
+                    }
+                };
+
+                fileReader.onerror = function() {
+                    reject(new Error('MD5 计算失败'));
+                };
+
+                function loadNext() {
+                    const start = currentChunk * chunkSize;
+                    const end = Math.min(start + chunkSize, file.size);
+                    fileReader.readAsArrayBuffer(file.slice(start, end));
+                }
+
+                loadNext();
+            });
+        }
+
+        // 更新进度条
+        function updateProgress(uploaded, total) {
+            const percent = Math.round(uploaded / total * 100);
+            elements.progressFill.style.width = percent + '%';
+            elements.progressText.textContent = `${percent}% (${uploaded}/${total})`;
+        }
+
+        // ==================== 核心上传逻辑 ====================
+
+        // 1. 检查文件（秒传 + 断点）
+        async function checkFile() {
+            addLog('检查文件是否存在...');
+            
+            try {
+                const response = await fetch(`${CONFIG.API_BASE}/check`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        fileMd5: state.fileMd5,
+                        fileName: state.file.name,
+                        totalChunks: state.totalChunks
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.code === 200) {
+                    const data = result.data;
+                    
+                    if (!data.shouldUpload) {
+                        addLog('✅ 文件已存在，秒传成功！', 'success');
+                        updateProgress(100, 100);
+                        return false;  // 不需要上传
+                    }
+                    
+                    // 断点续传
+                    if (data.uploadedChunkIndexes && data.uploadedChunkIndexes.length > 0) {
+                        data.uploadedChunkIndexes.forEach(idx => {
+                            state.uploadedChunks.add(idx);
+                        });
+                        addLog(`⚠️ 断点续传：已上传 ${data.uploadedChunkIndexes.length}/${state.totalChunks} 分片`, 'warn');
+                        updateProgress(data.uploadedChunks, state.totalChunks);
+                    }
+                }
+                
+                return true;  // 需要上传
+            } catch (error) {
+                addLog(`检查文件失败：${error.message}`, 'error');
+                return true;  // 失败时继续上传
+            }
+        }
+
+        // 2. 上传单个分片
+        async function uploadChunk(chunkIndex, chunkBlob) {
+            const formData = new FormData();
+            formData.append('fileMd5', state.fileMd5);
+            formData.append('fileName', state.file.name);
+            formData.append('chunkIndex', chunkIndex);
+            formData.append('totalChunks', state.totalChunks);
+            formData.append('chunkFile', chunkBlob);
+
+            const response = await fetch(`${CONFIG.API_BASE}/chunk`, {
+                method: 'POST',
+                body: formData
+            });
+
+            return await response.json();
+        }
+
+        // 3. 并发上传所有分片
+        async function uploadChunks() {
+            addLog('开始上传分片...');
+            state.isUploading = true;
+            elements.uploadBtn.disabled = true;
+
+            // 生成所有分片
+            const chunks = [];
+            for (let i = 0; i < state.totalChunks; i++) {
+                if (!state.uploadedChunks.has(i)) {
+                    const start = i * CONFIG.CHUNK_SIZE;
+                    const end = Math.min(start + CONFIG.CHUNK_SIZE, state.file.size);
+                    chunks.push({
+                        index: i,
+                        blob: state.file.slice(start, end)
+                    });
+                }
+            }
+
+            if (chunks.length === 0) {
+                addLog('✅ 所有分片已上传完成', 'success');
+                state.isUploading = false;
+                elements.uploadBtn.disabled = false;
+                elements.mergeBtn.disabled = false;
+                return;
+            }
+
+            // 并发控制上传
+            const queue = [...chunks];
+            const running = new Set();
+            let completed = state.uploadedChunks.size;
+
+            return new Promise((resolve, reject) => {
+                const next = async () => {
+                    if (queue.length === 0 && running.size === 0) {
+                        addLog('✅ 所有分片上传完成', 'success');
+                        state.isUploading = false;
+                        elements.uploadBtn.disabled = false;
+                        elements.mergeBtn.disabled = false;
+                        resolve();
+                        return;
+                    }
+
+                    while (running.size < CONFIG.CONCURRENT_LIMIT && queue.length > 0) {
+                        const chunk = queue.shift();
+                        running.add(chunk.index);
+
+                        uploadChunk(chunk.index, chunk.blob)
+                            .then(result => {
+                                if (result.code === 200) {
+                                    state.uploadedChunks.add(chunk.index);
+                                    completed++;
+                                    updateProgress(completed, state.totalChunks);
+                                    addLog(`✅ 分片 ${chunk.index + 1}/${state.totalChunks} 上传成功`);
+                                } else {
+                                    addLog(`❌ 分片 ${chunk.index + 1} 上传失败：${result.msg}`, 'error');
+                                    queue.push(chunk);  // 失败重试
+                                }
+                            })
+                            .catch(err => {
+                                addLog(`❌ 分片 ${chunk.index + 1} 网络错误：${err.message}`, 'error');
+                                queue.push(chunk);  // 失败重试
+                            })
+                            .finally(() => {
+                                running.delete(chunk.index);
+                                next();
+                            });
+                    }
+                };
+
+                next();
+            });
+        }
+
+        // 4. 合并分片
+        async function mergeChunks() {
+            addLog('请求合并文件...');
+            elements.mergeBtn.disabled = true;
+
+            try {
+                const response = await fetch(`${CONFIG.API_BASE}/merge`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        fileMd5: state.fileMd5,
+                        fileName: state.file.name
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.code === 200) {
+                    addLog('✅ 文件合并成功！', 'success');
+                    addLog(`📁 文件路径：${result.data.fileUrl}`);
+                } else {
+                    addLog(`❌ 合并失败：${result.msg}`, 'error');
+                    elements.mergeBtn.disabled = false;
+                }
+            } catch (error) {
+                addLog(`❌ 合并请求失败：${error.message}`, 'error');
+                elements.mergeBtn.disabled = false;
+            }
+        }
+
+        // ==================== 事件绑定 ====================
+
+        // 选择文件
+        elements.uploadArea.addEventListener('click', () => {
+            elements.fileInput.click();
+        });
+
+        elements.fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) handleFileSelect(file);
+        });
+
+        // 拖拽上传
+        elements.uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            elements.uploadArea.classList.add('dragover');
+        });
+
+        elements.uploadArea.addEventListener('dragleave', () => {
+            elements.uploadArea.classList.remove('dragover');
+        });
+
+        elements.uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            elements.uploadArea.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) handleFileSelect(file);
+        });
+
+        // 处理文件选择
+        async function handleFileSelect(file) {
+            state.file = file;
+            
+            // 显示文件信息
+            elements.fileName.textContent = file.name;
+            elements.fileSize.textContent = formatSize(file.size);
+            state.totalChunks = Math.ceil(file.size / CONFIG.CHUNK_SIZE);
+            elements.totalChunks.textContent = state.totalChunks;
+            elements.fileInfo.classList.add('show');
+            
+            // 显示进度条
+            elements.progressContainer.classList.add('show');
+            updateProgress(0, state.totalChunks);
+            
+            // 重置状态
+            state.uploadedChunks.clear();
+            elements.mergeBtn.disabled = true;
+            elements.uploadBtn.disabled = false;
+            
+            addLog(`📁 选择文件：${file.name} (${formatSize(file.size)})`);
+            addLog(`📊 总分片数：${state.totalChunks}`);
+            
+            // 计算 MD5
+            try {
+                state.fileMd5 = await calculateMd5(file);
+                addLog(`🔐 文件 MD5：${state.fileMd5}`);
+            } catch (error) {
+                addLog(`MD5 计算失败：${error.message}`, 'error');
+            }
+        }
+
+        // 开始上传按钮
+        elements.uploadBtn.addEventListener('click', async () => {
+            if (!state.file || !state.fileMd5) {
+                addLog('❌ 请先选择文件', 'error');
+                return;
+            }
+
+            // 检查文件
+            const shouldUpload = await checkFile();
+            if (!shouldUpload) return;
+
+            // 上传分片
+            await uploadChunks();
+        });
+
+        // 合并文件按钮
+        elements.mergeBtn.addEventListener('click', mergeChunks);
+
+        // 初始化日志
+        addLog('🚀 页面加载完成，请选择文件上传');
+    </script>
+    
+    <!-- 引入 SparkMD5 库（用于计算 MD5） -->
+    <!-- <script src="https://cdn.jsdelivr.net/npm/spark-md5@3.0.2/spark-md5.min.js"></script> -->
+    <script src="https://cdn.bootcdn.net/ajax/libs/spark-md5/3.0.2/spark-md5.min.js"></script>
+</body>
+</html>
