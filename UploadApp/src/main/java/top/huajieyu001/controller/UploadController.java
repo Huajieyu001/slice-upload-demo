@@ -36,11 +36,6 @@ public class UploadController {
         return Result.success(fileUploadRecordService.chunkUpload(chunkUploadRequest));
     }
 
-    @PostMapping("/merge")
-    public Result<MergeVO> merge(@RequestBody MergeRequest mergeRequest) {
-        return Result.success(fileUploadRecordService.merge(mergeRequest));
-    }
-
     @GetMapping("/progress/{fileMd5}")
     public Result<UploadProgressVO> progress(@PathVariable String fileMd5) {
         return Result.success(fileUploadRecordService.progress(fileMd5));

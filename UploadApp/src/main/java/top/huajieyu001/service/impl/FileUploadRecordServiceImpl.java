@@ -2,103 +2,134 @@ package top.huajieyu001.service.impl;
 
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.tomcat.util.http.fileupload.FileUtils;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.util.DigestUtils;
+import top.huajieyu001.constant.PathConstants;
+import top.huajieyu001.constant.RedisConstants;
 import top.huajieyu001.domain.*;
 import top.huajieyu001.mapper.FileUploadRecordMapper;
+import top.huajieyu001.properties.MinioProperties;
 import top.huajieyu001.service.FileUploadRecordService;
+import top.huajieyu001.service.MinioService;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
+import javax.annotation.Resource;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
+import java.util.*;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.stream.Collectors;
 
 /**
-* @author xanadu
-* @description 针对表【file_upload_record】的数据库操作Service实现
-* @createDate 2026-03-19 14:09:14
-*/
+ * @author xanadu
+ * @description 针对表【file_upload_record】的数据库操作Service实现
+ * @createDate 2026-03-19 14:09:14
+ */
 @Service
 @Slf4j
 public class FileUploadRecordServiceImpl extends ServiceImpl<FileUploadRecordMapper, FileUploadRecord>
-    implements FileUploadRecordService {
+        implements FileUploadRecordService {
 
-    @Value("${mine.upload.temp-dir}")
-    private String tempDir;
+    @Resource
+    private RedisTemplate redisTemplate;
 
-    @Value("${mine.upload.target-dir}")
-    private String targetDir;
+    @Resource
+    private MinioProperties minioProperties;
+
+    @Resource
+    private MinioService minioService;
+
+    @Resource
+    private ThreadPoolExecutor fileProcessThreadPool;
 
     @Override
     public UploadCheckVO check(UploadCheckRequest checkRequest) {
-        FileUploadRecord record = lambdaQuery().eq(FileUploadRecord::getFileMd5, checkRequest.getFileMd5()).one();
         UploadCheckVO vo = new UploadCheckVO();
 
-        // 秒传
-        if (record != null && record.getStatus() == 2) {
-            vo.setFileUrl(record.getFilePath());
-            vo.setShouldUpload(false);
-            return vo;
+        Map entries = redisTemplate.opsForHash().entries(RedisConstants.FILE_PROCESS_UPLOAD_INFO_PREFIX + checkRequest.getFileMd5());
+        if (entries != null && entries.size() > 0) {
+            String objectName = (String) entries.get("objectName");
+            if (objectName != null) {
+                // md5存在，并且状态为已经合并可以秒传
+                vo.setFileUrl(objectName);
+                vo.setShouldUpload(false);
+                return vo;
+            }
+            // 如果存在entries但是objectName为null。说明此时是已经开始上传但还未上传成功
+            // 获取已上传的分片索引返回
+            Set<Integer> members = redisTemplate.opsForSet().members(RedisConstants.FILE_PROCESS_UPLOADED_CHUNK_SET_PREFIX + checkRequest.getFileMd5());
+            vo.setUploadedChunkIndexes(new ArrayList<>(members));
+            // 如果已经上传成功但只是还未合并，则触发合并操作
+            if (members.size() == checkRequest.getTotalChunks()) {
+                sync(checkRequest.getFileMd5());
+            }
+        } else {
+            // 不存在对应md5的hash信息，则新建一份记录总分片数和文件名称信息（为了获取文件类型）
+            Map<String, Object> map = new HashMap<>();
+            map.put("totalChunks", checkRequest.getTotalChunks());
+            map.put("fileName", checkRequest.getFileName());
+            redisTemplate.opsForHash().putAll(RedisConstants.FILE_PROCESS_UPLOAD_INFO_PREFIX + checkRequest.getFileMd5(), map);
         }
-
         vo.setShouldUpload(true);
-
-        // 状态为0说明未上传完成所有分片
-        if(record != null && record.getStatus() == 0) {
-            vo.setTotalChunks(record.getTotalChunks());
-            vo.setUploadedChunks(record.getUploadedChunks());
-            vo.setUploadedChunkIndexes(getUploadedChunkIndexes(checkRequest.getFileMd5()));
-        }
         return vo;
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public ChunkUploadVO chunkUpload(ChunkUploadRequest chunkUploadRequest) {
+        String key = RedisConstants.FILE_PROCESS_UPLOADED_CHUNK_SET_PREFIX + chunkUploadRequest.getFileMd5();
+
+        Set members = redisTemplate.opsForSet().members(key);
+
+        // 如果md5对应分片已经上传过，则终止后续处理
+        if (members != null && members.contains(chunkUploadRequest.getChunkIndex())) {
+            return null;
+        }
+
+        // 上传到Minio中
+        minioService.upload(minioProperties.getBucket(),
+                PathConstants.TEMP_CHUNK + "/" + chunkUploadRequest.getFileMd5() + "/" + chunkUploadRequest.getChunkIndex(),
+                chunkUploadRequest.getChunkFile()
+        );
+
+        // 上传成功把分片索引记录到redis中
+        redisTemplate.opsForSet().add(key, chunkUploadRequest.getChunkIndex());
+
+        int uploadedChunks = redisTemplate.opsForSet().members(key).size();
+
         ChunkUploadVO vo = new ChunkUploadVO();
-        String chunkDir = getChunkDir(chunkUploadRequest.getFileMd5());
-        File dir = new File(chunkDir);
+        vo.setUploadedChunks(uploadedChunks);
+        vo.setChunkIndex(chunkUploadRequest.getChunkIndex());
+        vo.setTotalChunks(chunkUploadRequest.getTotalChunks());
 
-        if(!dir.exists()) {
-            dir.mkdirs();
+        log.info("uploadedChunks is {}", uploadedChunks);
+        if (uploadedChunks == chunkUploadRequest.getTotalChunks()) {
+            // 触发一次合并操作
+            sync(chunkUploadRequest.getFileMd5());
         }
+        return vo;
+    }
 
-        String chunkPath = chunkDir + File.separator + chunkUploadRequest.getChunkIndex();
-        File chunkFile = new File(chunkPath);
-
-        try{
-            chunkUploadRequest.getChunkFile().transferTo(chunkFile);
-            log.info("分片上传成功，md5为{}，分片为{}", chunkUploadRequest.getFileMd5(), chunkUploadRequest.getChunkIndex());
-        } catch (Exception e) {
-            log.error("分片保存失败", e);
-            throw new RuntimeException(e);
-        }
-
-        FileUploadRecord record = lambdaQuery().eq(FileUploadRecord::getFileMd5, chunkUploadRequest.getFileMd5()).one();
-        if(record == null) {
-            record = new FileUploadRecord();
-            record.setFileMd5(chunkUploadRequest.getFileMd5());
-            record.setFileName(chunkUploadRequest.getFileName());
-            record.setTotalChunks(chunkUploadRequest.getTotalChunks());
-            record.setUploadedChunks(1);
-            record.setStatus(0);
-            record.setCreateTime(LocalDateTime.now());
-            this.save(record);
+    @Override
+    public UploadProgressVO progress(String fileMd5) {
+        UploadProgressVO vo = new UploadProgressVO();
+        Set<Integer> members = redisTemplate.opsForSet().members(RedisConstants.FILE_PROCESS_UPLOADED_CHUNK_SET_PREFIX + fileMd5);
+        if (members == null || members.size() == 0) {
+            vo.setProgress(0);
+            vo.setStatus(0);
+            vo.setUploadedChunks(0);
+            vo.setTotalChunks(0);
         } else {
-            List<Integer> uploadedIndexes = getUploadedChunkIndexes(chunkUploadRequest.getFileMd5());
-            if(!uploadedIndexes.contains(chunkUploadRequest.getChunkIndex())) {
-                record.setUploadedChunks(record.getUploadedChunks() + 1);
-                record.setUpdateTime(LocalDateTime.now());
-                updateById(record);
+            Map entries = redisTemplate.opsForHash().entries(RedisConstants.FILE_PROCESS_UPLOAD_INFO_PREFIX + fileMd5);
+            Integer totalChunks = (Integer) entries.get("totalChunks");
+            vo.setProgress(members.size() * 100 / totalChunks);
+            vo.setTotalChunks(totalChunks);
+            vo.setUploadedChunks(members.size());
+            if (members.size() < totalChunks) {
+                vo.setStatus(1);
+            } else {
+                vo.setStatus(2);
+                sync(fileMd5);
             }
         }
         return vo;
@@ -106,132 +137,54 @@ public class FileUploadRecordServiceImpl extends ServiceImpl<FileUploadRecordMap
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public MergeVO merge(MergeRequest mergeRequest) {
-        MergeVO vo = new MergeVO();
-        FileUploadRecord record = lambdaQuery().eq(FileUploadRecord::getFileMd5, mergeRequest.getFileMd5()).one();
-        if (record == null) {
-            throw new RuntimeException("上传记录不存在");
-        }
-
-        if (getUploadedChunkIndexes(mergeRequest.getFileMd5()).size() < record.getTotalChunks()) {
-            throw new RuntimeException("分片未上传完成");
-        }
-
-        // 1. 创建最终文件目录
-        String finalDir = targetDir + "/" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy/MM/dd"));
-        File dir = new File(finalDir);
-        if (!dir.exists()) {
-            dir.mkdirs();
-        }
-
-        String finalFilePath = finalDir + File.separator + UUID.randomUUID().toString() + "__" + record.getFileName();
-        File finalFile = new File(finalFilePath);
-
-        String chunkDir = getChunkDir(mergeRequest.getFileMd5());
-        try(FileOutputStream fos = new FileOutputStream(finalFile)) {
-            for (int i = 0; i < record.getTotalChunks(); i++) {
-                File chunkFile = new File(chunkDir + File.separator + i);
-                if(chunkFile == null || !chunkFile.exists()) {
-                    throw new RuntimeException("分片不存在，对应索引为：" + i);
-                }
-                try(FileInputStream fis = new FileInputStream(chunkFile)) {
-                    byte[] buffer = new byte[8192];
-                    int len;
-                    while ((len = fis.read(buffer)) > 0) {
-                        fos.write(buffer, 0, len);
-                    }
-                }
+    public void sync(String fileMd5) {
+        fileProcessThreadPool.execute(() -> {
+            FileUploadRecord existsRecord = lambdaQuery().eq(FileUploadRecord::getFileMd5, fileMd5).one();
+            if (existsRecord != null) {
+                log.info("数据已经合并和落库，跳过操作，md5={}", fileMd5);
+                return;
             }
-            log.info("文件合并成功{}", finalFilePath);
-        } catch (IOException e){
-            log.error("文件合并失败", e);
-            throw new RuntimeException(e);
-        }
-
-        // 校验文件md5
-        String finalMd5 = calMd5(finalFile);
-        if(!finalMd5.equals(mergeRequest.getFileMd5())) {
-            log.error("md5校验失败，期望是{}，实际是{}", mergeRequest.getFileMd5(), finalMd5);
-            finalFile.delete();
-            throw new RuntimeException("文件完整性校验失败");
-        }
-
-        record.setStatus(2);
-        record.setFilePath(finalFilePath);
-        record.setFileSize(finalFile.length());
-        record.setUpdateTime(LocalDateTime.now());
-        updateById(record);
-
-        // 清理临时文件
-        cleanupChunkFiles(mergeRequest.getFileMd5());
-
-        vo.setFileUrl(finalFilePath);
-        vo.setFileName(record.getFileName());
-        vo.setFileSize(record.getFileSize());
-        return vo;
-    }
-
-    @Override
-    public UploadProgressVO progress(String fileMd5) {
-        UploadProgressVO vo = new UploadProgressVO();
-        FileUploadRecord record = lambdaQuery().eq(FileUploadRecord::getFileMd5, fileMd5).one();
-
-        if(record == null) {
-            vo.setProgress(0);
-            vo.setStatus(0);
-            return vo;
-        }
-
-        vo.setProgress(record.getUploadedChunks() * 100 / record.getTotalChunks());
-        vo.setStatus(record.getStatus());
-        vo.setTotalChunks(record.getTotalChunks());
-        vo.setUploadedChunks(record.getUploadedChunks());
-        return vo;
-    }
-
-    private List<Integer> getUploadedChunkIndexes(String fileMd5) {
-        List<Integer> list = new ArrayList<>();
-        String chunkDir = getChunkDir(fileMd5);
-        File dir = new File(chunkDir);
-        if (dir.exists()) {
-            File[] files = dir.listFiles();
-            for (File file : files) {
-                list.add(Integer.parseInt(file.getName()));
+            Set members = redisTemplate.opsForSet().members(RedisConstants.FILE_PROCESS_UPLOADED_CHUNK_SET_PREFIX + fileMd5);
+            Map entries = redisTemplate.opsForHash().entries(RedisConstants.FILE_PROCESS_UPLOAD_INFO_PREFIX + fileMd5);
+            if (entries == null) {
+                throw new RuntimeException("entries is null, md5 = " + fileMd5);
             }
-        }
-        return list;
+            Integer totalChunks = (Integer) entries.get("totalChunks");
+            String fileName = (String) entries.get("fileName");
+
+            if (members == null || members.size() != totalChunks) {
+                return;
+            }
+
+            List<Integer> list = new ArrayList(members);
+            Collections.sort(list);
+
+            List<String> nameList = list.stream().map(x -> PathConstants.TEMP_CHUNK + "/" + fileMd5 + "/" + x).collect(Collectors.toList());
+
+            String objectName = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy/MM/dd")) + "/" + UUID.randomUUID() + fileName;
+            minioService.merge(minioProperties.getBucket(), objectName, nameList);
+            String calculatedMd5 = minioService.calculateMd5(minioProperties.getBucket(), objectName);
+            if (!calculatedMd5.equals(fileMd5)) {
+                clearAllData(fileMd5, minioProperties.getBucket(), objectName);
+                throw new RuntimeException("Md5 does not match, expected: " + fileMd5 + ", actual: " + calculatedMd5);
+            }
+            log.info("md5 matched, expected: {}, actual: {}", fileMd5, calculatedMd5);
+            redisTemplate.opsForHash().put(RedisConstants.FILE_PROCESS_UPLOAD_INFO_PREFIX + fileMd5, "objectName", objectName);
+
+            FileUploadRecord record = new FileUploadRecord();
+            record.setFileMd5(fileMd5);
+            record.setBucket(minioProperties.getBucket());
+            record.setObjectName(objectName);
+            record.setFileSize(minioService.getFileSize(minioProperties.getBucket(), objectName));
+            record.setCreateTime(LocalDateTime.now());
+            record.setUpdateTime(LocalDateTime.now());
+            this.save(record);
+        });
     }
 
-    private String getChunkDir(String fileMd5) {
-        return tempDir + "/chunks/" + fileMd5;
-    }
-
-    private void cleanupChunkFiles(String fileMd5) {
-        String chunkDir = getChunkDir(fileMd5);
-        File dir = new File(chunkDir);
-        if(dir.exists()){
-            CompletableFuture.runAsync(() -> {
-                try {
-                    Thread.sleep(30000);
-                    FileUtils.deleteDirectory(dir);
-                    log.info("临时文件已删除{}", fileMd5);
-                } catch (InterruptedException | IOException e) {
-                    log.error("临时文件删除失败:", e);
-                }
-            });
-        }
-    }
-
-    private String calMd5(File file) {
-        try(FileInputStream fis = new FileInputStream(file)){
-            return DigestUtils.md5DigestAsHex(fis);
-        } catch (IOException e){
-            log.error("md5计算失败:", e);
-            throw new RuntimeException(e);
-        }
+    private void clearAllData(String md5, String bucket, String objectName) {
+        redisTemplate.delete(RedisConstants.FILE_PROCESS_UPLOAD_INFO_PREFIX + md5);
+        redisTemplate.delete(RedisConstants.FILE_PROCESS_UPLOADED_CHUNK_SET_PREFIX + md5);
+        minioService.delete(bucket, objectName);
     }
 }
-
-
-
-

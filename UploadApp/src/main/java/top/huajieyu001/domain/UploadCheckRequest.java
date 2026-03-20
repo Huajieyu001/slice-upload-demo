@@ -9,4 +9,5 @@ import lombok.Data;
 public class UploadCheckRequest {
     private String fileMd5;
     private String fileName;
+    private Integer totalChunks;
 }

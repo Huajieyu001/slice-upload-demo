@@ -5,15 +5,12 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
-import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.Date;
 
 /**
- * 
  * @TableName file_upload_record
  */
-@TableName(value ="file_upload_record")
+@TableName(value = "file_upload_record")
 @Data
 public class FileUploadRecord {
     /**
@@ -28,34 +25,20 @@ public class FileUploadRecord {
     private String fileMd5;
 
     /**
+     * 文件存储桶名
+     */
+    private String bucket;
+
+    /**
      * 原始文件名
      */
-    private String fileName;
+    private String objectName;
+
 
     /**
      * 文件大小
      */
     private Long fileSize;
-
-    /**
-     * 总分片数
-     */
-    private Integer totalChunks;
-
-    /**
-     * 已上传分片数
-     */
-    private Integer uploadedChunks;
-
-    /**
-     * 状态：0-上传中 1-已完成 2-已合并
-     */
-    private Integer status;
-
-    /**
-     * 最终文件路径
-     */
-    private String filePath;
 
     /**
      * 创建时间

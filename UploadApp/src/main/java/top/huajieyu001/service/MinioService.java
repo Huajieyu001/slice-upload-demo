@@ -1,28 +1,27 @@
 package top.huajieyu001.service;
 
-import io.minio.MinioClient;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
-import top.huajieyu001.properties.MinioProperties;
+
+import java.io.InputStream;
+import java.util.List;
 
 /**
  * @Author huajieyu
- * @Date 2026/3/19 18:32
+ * @Date 2026/3/19 20:07
  * @Version 1.0
  * @Description TODO
  */
-@Service
-public class MinioService {
+public interface MinioService {
 
-    @Autowired
-    private MinioClient minioClient;
+    void upload(String bucket, String objectName, MultipartFile file);
 
-    @Autowired
-    public MinioProperties minioProperties;
-//
-//    public String uploadFile(MultipartFile file) {
-//        minioClient.uploadObject()
-//    }
+    void merge(String bucket, String objectName, List<String> chunkObjectNameList);
 
+    long getFileSize(String bucket, String objectName);
+
+    InputStream getInputStream(String bucket, String objectName);
+
+    String calculateMd5(String bucket, String objectName);
+
+    void delete(String bucket, String objectName);
 }
